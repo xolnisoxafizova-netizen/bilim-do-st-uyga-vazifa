@@ -150,7 +150,8 @@ const R = {
   aiImages: false, aiOff: false, me: null, tasks: [], students: [], subs: [], loaded: {}, unsubs: [],
   slow: false, dbErr: false, restoring: false, working: "", files: { task: null, ans: null, ai: null }, urls: {},
   creds: null, aiBusy: false, aiCtl: null, aiStream: "", aiRetry: null, aiImg: new Map(), toastT: 0,
-  local: false, localVolatile: false, demoSeeded: false, fileReg: new Map()
+  local: false, localVolatile: false, demoSeeded: false, fileReg: new Map(),
+  chk: { busy: false, ctl: null, queue: [], done: 0, current: null }, chkErr: {}
 };
 
 /* ---------- standalone mode: outside claude.ai the data lives in this browser ---------- */
@@ -860,6 +861,149 @@ async function aiFromTask(task) {
 }
 function scrollAi() { const c = document.getElementById("ai-chat"); if (c) c.scrollTop = c.scrollHeight; }
 
+/* ---------- AI checking of student answers (teacher side) ---------- */
+function loadScript(src) {
+  return new Promise((res, rej) => { const el = document.createElement("script"); el.src = src; el.onload = res; el.onerror = () => rej(new Error("script")); document.head.appendChild(el); });
+}
+let pdfjsPromise = null;
+function loadPdfJs() {
+  if (!pdfjsPromise) {
+    const base = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+    pdfjsPromise = Promise.race([
+      (async () => {
+        // The worker build, loaded as a plain script, lets pdf.js read PDFs on the page itself.
+        await loadScript(base + "pdf.worker.min.js");
+        await loadScript(base + "pdf.min.js");
+        const lib = window.pdfjsLib || window["pdfjs-dist/build/pdf"];
+        if (!lib) throw new Error("pdfjs");
+        lib.GlobalWorkerOptions.workerSrc = base + "pdf.worker.min.js";
+        return lib;
+      })(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 20000))
+    ]);
+    pdfjsPromise.catch(() => { pdfjsPromise = null; });
+  }
+  return pdfjsPromise;
+}
+async function pdfToImages(blob, maxPages) {
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
+  const out = [];
+  for (let i = 1; i <= Math.min(doc.numPages, maxPages); i++) {
+    const page = await doc.getPage(i);
+    const v1 = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: Math.min(2, 1600 / Math.max(v1.width, v1.height)) });
+    const c = document.createElement("canvas");
+    c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    out.push(await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error("toBlob"))), "image/jpeg", 0.85)));
+  }
+  try { doc.destroy(); } catch (_) {}
+  return out;
+}
+async function fileToImages(f, maxPages) {
+  if (!f) return [];
+  const res = await fetch(fileUrl(f));
+  if (!res.ok) throw new Error("fetch");
+  const blob = await res.blob();
+  if (/pdf/i.test(f.turi || "") || blob.type === "application/pdf") return await pdfToImages(blob, maxPages);
+  return [await toJpeg(blob, 2000, 0.85)];
+}
+function aiCheckPrompt(task, s, nTask, nAns) {
+  return [
+    `Sen tajribali ${s.fan} o'qituvchisisan. O'zbekistondagi ${sinfNum(s.sinf) || ""}-sinf o'quvchisining uyga vazifasini tekshirasan.`,
+    `Vazifa nomi: ${task ? task.sarlavha : s.sarlavha}`,
+    task && task.izoh ? `O'qituvchi yozgan vazifa matni yoki ko'rsatmasi:\n${task.izoh}` : "",
+    nTask ? `Rasmlar tartibi: birinchi ${nTask} ta rasm o'qituvchi bergan vazifa, keyingi ${nAns} ta rasm o'quvchining javobi.` : `Rasmlar: ${nAns} ta rasm o'quvchining javobi (vazifa matni yuqorida).`,
+    "",
+    "Qanday tekshirish kerak:",
+    "- Har bir misol yoki savolni alohida tekshir: o'quvchining yechimi va javobi to'g'rimi.",
+    "- Xatolarni qisqa va aniq yoz: qaysi misol, qayerda adashgan.",
+    "- Rasm o'qilmasa, javob vazifaga tegishli bo'lmasa yoki vazifa nimaligini aniqlab bo'lmasa, holat \"aniqlanmadi\" bo'lsin va sababini xulosada yoz.",
+    "- Taklif qilinadigan baho 5 ballik tizimda: 5 = hammasi to'g'ri; 4 = kichik xatolar; 3 = taxminan yarmi to'g'ri; 2 = asosan noto'g'ri yoki bajarilmagan.",
+    "- Hamma matnni o'zbek tilida, lotin yozuvida yoz. Formulalarni oddiy matnda yoz, LaTeX ishlatma.",
+    "",
+    "Faqat bitta JSON obyekt qaytar:",
+    `{"holat": "togri" | "qisman" | "notogri" | "aniqlanmadi", "togri_soni": to'g'ri bajarilgan misollar soni, "jami": jami misollar soni, "taklif_baho": 2 | 3 | 4 | 5 | null, "xulosa": "o'qituvchi uchun 1-2 jumla", "xatolar": ["qisqa izoh", "..."], "oquvchiga": "o'quvchiga bitta jumlalik maslahat"}`
+  ].filter(Boolean).join("\n");
+}
+const clip = (v, n) => (typeof v === "string" ? v.trim().slice(0, n) : "");
+function readCheck(v) {
+  if (!v || typeof v !== "object") throw { code: "invalid_json" };
+  const holat = ["togri", "qisman", "notogri", "aniqlanmadi"].includes(v.holat) ? v.holat : "aniqlanmadi";
+  const jami = clampInt(v.jami, 0, 99, 0);
+  const baho = [2, 3, 4, 5].includes(Number(v.taklif_baho)) ? Number(v.taklif_baho) : null;
+  return {
+    holat, jami, togri: Math.min(jami, clampInt(v.togri_soni, 0, 99, 0)),
+    baho: holat === "aniqlanmadi" ? null : baho,
+    xulosa: clip(v.xulosa, 600), oquvchiga: clip(v.oquvchiga, 300),
+    xatolar: Array.isArray(v.xatolar) ? v.xatolar.map((x) => clip(x, 240)).filter(Boolean).slice(0, 8) : []
+  };
+}
+function aiCheckCopy(code) {
+  if (code === "answer_unreadable") return "O'quvchi javobini AI o'qiy olmadi (rasm yoki PDF ochilmadi). Javobni ko'zdan kechirib, o'zingiz baholang.";
+  if (code === "no_answer") return "Bu javobda tekshiriladigan rasm yoki PDF yo'q.";
+  if (code === "images_unavailable") return "Bu ko'rinishda AI'ga rasm yuborib bo'lmaydi.";
+  if (code === "invalid_json" || code === "empty_completion") return "AI tushunarli javob qaytarmadi. Qayta tekshirib ko'ring.";
+  return aiCopy(code);
+}
+async function checkOne(subId, signal) {
+  const s = R.subs.find((x) => x.id === subId);
+  if (!s || s.turi === "test") return;
+  if (!s.fayl) throw { code: "no_answer" };
+  const task = R.tasks.find((t) => t.id === s.taskId);
+  const sample = R.sample !== undefined ? R.sample : await R.samplePromise;
+  if (!sample) throw { code: "no_sample" };
+  const lim = await sample.limits().catch(() => null);
+  if (!lim || !lim.images) throw { code: "images_unavailable" };
+  const maxN = Math.max(1, Math.min(lim.images.maxCount || 4, 6));
+  const notes = [];
+  let ansImgs;
+  try { ansImgs = await fileToImages(s.fayl, 3); } catch (_) { throw { code: "answer_unreadable" }; }
+  if (!ansImgs.length) throw { code: "answer_unreadable" };
+  ansImgs = ansImgs.slice(0, maxN);
+  let taskImgs = [];
+  if (task && task.fayl && maxN > ansImgs.length) {
+    try { taskImgs = (await fileToImages(task.fayl, 2)).slice(0, maxN - ansImgs.length); }
+    catch (_) { notes.push("Vazifa faylini AI o'qiy olmadi: tekshiruv faqat vazifa matni va o'quvchi javobiga qarab qilindi."); }
+  }
+  if (signal.aborted) throw { code: "cancelled" };
+  const v = await sample.json(aiCheckPrompt(task, s, taskImgs.length, ansImgs.length), { images: taskImgs.concat(ansImgs), signal, cache: false });
+  const ai = Object.assign(readCheck(v), { izohlar: notes, vaqt: Date.now() });
+  await R.db.doc("submissions/" + subId).update({ ai });
+}
+async function checkMany(ids) {
+  if (R.chk.busy || !ids.length) return;
+  const ctl = new AbortController();
+  R.chk = { busy: true, ctl, queue: ids.slice(), done: 0, current: null };
+  ids.forEach((id) => { delete R.chkErr[id]; });
+  render();
+  let ok = 0, stopMsg = "";
+  for (const id of ids) {
+    if (ctl.signal.aborted) break;
+    R.chk.current = id; render();
+    try { await checkOne(id, ctl.signal); ok++; }
+    catch (e) {
+      const code = (e && e.code) || "upstream_error";
+      if (code === "cancelled") break;
+      R.chkErr[id] = aiCheckCopy(code);
+      if (AI_HARD.has(code) || code === "rate_limited" || code === "images_unavailable") { stopMsg = aiCheckCopy(code); break; }
+    }
+    R.chk.done++;
+  }
+  const stopped = ctl.signal.aborted;
+  R.chk = { busy: false, ctl: null, queue: [], done: 0, current: null };
+  render();
+  if (stopMsg) toast(stopMsg);
+  else if (stopped) toast("AI tekshiruvi to'xtatildi.");
+  else if (ids.length > 1) toast(`AI ${ok} ta javobni tekshirdi. Natijalarni ko'rib, baho qo'ying.`);
+  else if (ok) toast("AI tekshirdi. Natijani ko'rib, bahoni o'zingiz qo'ying.");
+}
+const aiCanCheck = () => !R.local && R.sample !== null && !R.aiOff;
+const needsCheck = (s) => s.turi !== "test" && !!s.fayl && !s.ai && !s.baho;
+
 /* ---------- small UI helpers ---------- */
 function toast(msg) {
   const t = $("#toast");
@@ -970,7 +1114,7 @@ function vLanding() {
       <div class="section-h"><h2>Ikki profil, bitta daftar</h2><p>Har kim o'z ishini ko'radi: o'qituvchi sinflarini boshqaradi, o'quvchi esa faqat o'ziga kelgan vazifalarni.</p></div>
       <div class="roles">
         <article class="role"><div class="role-top">${ILL_TEACHER}<div><span class="hand">o'qituvchi</span><h3>O'qituvchi profili</h3></div></div>
-          <ul>${li("Viloyat, tuman, maktab va biriktirilgan sinflaringizni kiritasiz")}${li("O'quvchilar ro'yxatini kiritib, ularga login va parol yaratasiz")}${li("Fan va sinfni tanlab, vazifani rasm, PDF yoki test qilib yuborasiz")}${li("Javoblar ism-familiya bilan keladi: baholaysiz va hisobotni yuklab olasiz")}</ul></article>
+          <ul>${li("Viloyat, tuman, maktab va biriktirilgan sinflaringizni kiritasiz")}${li("O'quvchilar ro'yxatini kiritib, ularga login va parol yaratasiz")}${li("Fan va sinfni tanlab, vazifani rasm, PDF yoki test qilib yuborasiz")}${li("Javoblar ism-familiya bilan keladi: AI oldindan tekshirib baho taklif qiladi, yakuniy bahoni siz qo'yasiz")}</ul></article>
         <article class="role"><div class="role-top">${ILL_STUDENT}<div><span class="hand">o'quvchi</span><h3>O'quvchi profili</h3></div></div>
           <ul>${li("O'qituvchi bergan login va parol bilan kirasiz")}${li("Qaysi fandan vazifa kelganini bir qarashda ko'rasiz")}${li("Javobni rasmga olib yuklaysiz yoki testni shu yerda ishlaysiz")}${li("Baho va o'qituvchi izohini ko'rasiz, qiynalsangiz AI yordamchi bor")}</ul></article>
       </div>
@@ -1121,8 +1265,36 @@ function tVazifa() {
 function statusPill(s) {
   const late = s.kechikdi ? ` <span class="pill late">kech</span>` : "";
   if (s.baho) return `<span class="pill ok">Baho: ${esc(s.baho)}</span>${late}`;
+  if (R.chk.busy && R.chk.current === s.id) return `<span class="pill ai">AI tekshirmoqda</span>${late}`;
+  if (R.chk.busy && R.chk.queue.includes(s.id) && !s.ai) return `<span class="pill new">Navbatda</span>${late}`;
+  if (s.ai) return `<span class="pill ai">${s.ai.baho ? "AI: " + esc(s.ai.baho) : "AI: aniqlanmadi"}</span>${late}`;
   if (s.jami) return `<span class="pill new">Test: ${esc(s.ball)}/${esc(s.jami)}</span>${late}`;
   return `<span class="pill new">Yangi</span>${late}`;
+}
+function aiPanel(s) {
+  const head = (extra) => `<div class="ai-head">${IC.spark}<b>AI tekshiruvi</b>${extra || ""}</div>`;
+  if (R.local) return `<div class="ai-card">${head()}<p class="small muted">AI tekshiruvi platformaning claude.ai versiyasida ishlaydi.</p></div>`;
+  if (!aiCanCheck()) return "";
+  if (R.chk.busy && R.chk.current === s.id) {
+    return `<div class="ai-card" aria-busy="true">${head()}<p class="dots">Vazifa va javob solishtirilmoqda<span></span><span></span><span></span></p><div><button type="button" class="btn ghost small" data-act="ai-check-stop" id="ai-check-stop">To'xtatish</button></div></div>`;
+  }
+  const err = R.chkErr[s.id] ? `<p class="form-err">${esc(R.chkErr[s.id])}</p>` : "";
+  const a = s.ai;
+  if (!a) {
+    return `<div class="ai-card">${head()}<p class="small">AI o'quvchi javobini vazifa bilan solishtiradi, xatolarni topadi va baho taklif qiladi. Yakuniy bahoni o'zingiz qo'yasiz.</p>${err}<div><button type="button" class="btn small" data-act="ai-check" data-v="${esc(s.id)}" id="ai-check"${R.chk.busy || !s.fayl ? " disabled" : ""}>${IC.spark}<span>AI bilan tekshirish</span></button></div></div>`;
+  }
+  const pill = { togri: ["ok", "To'g'ri"], qisman: ["wait", "Qisman to'g'ri"], notogri: ["late", "Xatolar ko'p"], aniqlanmadi: ["new", "Aniqlab bo'lmadi"] }[a.holat] || ["new", ""];
+  return `<div class="ai-card">
+    ${head(`<span class="pill ${pill[0]}">${pill[1]}</span>${a.baho ? `<span class="ai-baho">taklif:<span class="grade">${esc(a.baho)}</span></span>` : ""}`)}
+    ${a.jami ? `<p class="small">To'g'ri bajarilgan: <b>${esc(a.togri)} / ${esc(a.jami)}</b></p>` : ""}
+    ${a.xulosa ? `<p>${esc(a.xulosa)}</p>` : ""}
+    ${a.xatolar && a.xatolar.length ? `<ul class="ai-errs">${a.xatolar.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+    ${a.oquvchiga ? `<p class="small"><b>O'quvchiga maslahat:</b> ${esc(a.oquvchiga)}</p>` : ""}
+    ${(a.izohlar || []).map((n) => `<p class="small muted">${esc(n)}</p>`).join("")}
+    ${err}
+    <div class="row">${a.baho ? `<button type="button" class="btn small" data-act="ai-apply" data-v="${esc(s.id)}" id="ai-apply">Taklifni qo'llash</button>` : ""}<button type="button" class="linkish" data-act="ai-check" data-v="${esc(s.id)}" id="ai-recheck"${R.chk.busy ? " disabled" : ""}>Qayta tekshirish</button></div>
+    <p class="tiny muted">AI xato qilishi mumkin: javobga o'zingiz ham qarang va yakuniy bahoni o'zingiz qo'ying. Tekshirildi: ${when(a.vaqt)}</p>
+  </div>`;
 }
 function subDetail(s) {
   const task = R.tasks.find((t) => t.id === s.taskId);
@@ -1136,7 +1308,7 @@ function subDetail(s) {
         const a = s.javoblar[i], ok = a === q.togri;
         return `<li class="${ok ? "y" : "n"}"><b>${i + 1}.</b> ${esc(q.savol)}<br><span class="muted">Javobi: ${esc(q.v[a] ?? "—")}${ok ? "" : ` · To'g'risi: ${esc(q.v[q.togri])}`}</span></li>`;
       }).join("")}</ol>` : "");
-  } else ans = fileView(s.fayl);
+  } else ans = fileView(s.fayl) + aiPanel(s);
   const w = R.working === "grade";
   return `<div class="card stack" id="sub-detail">
     <div class="row between" style="align-items:flex-start"><div><h2 class="card-h2" style="margin:0">${esc(fullName(s))}</h2><p class="muted small">${esc(s.sinf)} · ${esc(s.fan)} · ${esc(s.sarlavha)}</p><p class="muted small">Topshirildi: ${when(s.topshirilgan)}${s.kechikdi ? ` · <span class="pill late">muddatidan kech</span>` : ""}</p></div><button type="button" class="linkish" data-act="close-sub" id="close-sub">Yopish</button></div>
@@ -1156,12 +1328,18 @@ function tJavoblar() {
   if (f.holat === "yangi") subs = subs.filter((s) => !s.baho);
   else if (f.holat === "baholangan") subs = subs.filter((s) => !!s.baho);
   subs.sort((a, b) => (b.topshirilgan || 0) - (a.topshirilgan || 0));
+  R.inboxIds = subs.map((s) => s.id);
   const open = S.openSub ? R.subs.find((s) => s.id === S.openSub) : null;
   const taskOpts = [["all", "Barcha vazifalar"], ...R.tasks.slice().sort((a, b) => (b.yaratilgan || 0) - (a.yaratilgan || 0)).map((t) => [t.id, `${t.sinf} · ${t.fan}: ${t.sarlavha}`])];
   const list = !R.loaded.subs ? loadingBox()
     : !subs.length ? emptyBox(f.holat === "yangi" ? "Yangi javob yo'q" : "Javob topilmadi", f.holat === "yangi" ? "O'quvchilar topshirgan javoblar shu yerga ism-familiyasi bilan keladi." : "Filtrlarni o'zgartirib ko'ring.")
     : `<div class="sub-list">${subs.map((s) => `<button type="button" class="sub-row" data-act="open-sub" data-v="${esc(s.id)}" id="sub-${esc(s.id)}" aria-current="${S.openSub === s.id}"><span class="avatar">${esc(initials(s))}</span><span style="min-width:0"><b>${esc(fullName(s))}</b><small>${esc(s.sinf)} · ${esc(s.fan)} · ${esc(s.sarlavha)}</small><small>${when(s.topshirilgan)} · ${s.turi === "test" ? "Test" : "Savol-javob"}</small></span><span>${statusPill(s)}</span></button>`).join("")}</div>`;
-  return `<header class="sec-h"><div><h1>Kelgan javoblar</h1><p>O'quvchilar topshirgan vazifalar ism-familiyasi bilan shu yerda.</p></div></header>
+  const toCheck = subs.filter(needsCheck).map((s) => s.id);
+  const batch = !aiCanCheck() ? ""
+    : R.chk.busy ? `<div class="ai-bar">${IC.spark}<span>AI tekshirmoqda: <b>${R.chk.done + 1} / ${R.chk.queue.length}</b></span><button type="button" class="btn ghost small" data-act="ai-check-stop" id="ai-batch-stop">To'xtatish</button></div>`
+    : toCheck.length ? `<div class="ai-bar">${IC.spark}<span>${toCheck.length} ta javob hali tekshirilmagan.</span><button type="button" class="btn small" data-act="ai-check-all" id="ai-check-all">Barchasini AI bilan tekshirish</button></div>` : "";
+  return `<header class="sec-h"><div><h1>Kelgan javoblar</h1><p>O'quvchilar topshirgan vazifalar ism-familiyasi bilan shu yerda.${aiCanCheck() ? " AI javoblarni oldindan tekshirib, baho taklif qiladi." : ""}</p></div></header>
+    ${batch}
     <div class="filters4">${selectField("Sinf", "ib-sinf", "forms.inbox.sinf", [["all", "Barcha sinflar"], ...me.sinflar.map((s) => [s, s])], { rerender: true })}${selectField("Fan", "ib-fan", "forms.inbox.fan", [["all", "Barcha fanlar"], ...me.fanlar.map((x) => [x, x])], { rerender: true })}${selectField("Holat", "ib-holat", "forms.inbox.holat", [["yangi", "Baholanmagan"], ["baholangan", "Baholangan"], ["all", "Barchasi"]], { rerender: true })}${selectField("Vazifa", "ib-task", "forms.inbox.task", taskOpts, { rerender: true })}</div>
     <div class="two"><div>${list}</div><div>${open ? subDetail(open) : `<div class="empty">${ILL_EMPTY}<b>Javobni tanlang</b><p>Chapdagi ro'yxatdan o'quvchini bosing: javobi shu yerda ochiladi va baho qo'yasiz.</p></div>`}</div></div>`;
 }
@@ -1459,6 +1637,20 @@ function onClick(e) {
     case "ai-stop": if (R.aiCtl) R.aiCtl.abort(); break;
     case "ai-retry": if (R.aiRetry && !R.aiBusy) R.aiRetry(); break;
     case "open-file": { const f = R.fileReg.get(v); if (f) openDataFile(f); break; }
+    case "ai-check": if (aiCanCheck()) checkMany([v]); break;
+    case "ai-check-all": if (aiCanCheck()) checkMany(R.subs.filter((s) => (R.inboxIds || []).includes(s.id) && needsCheck(s)).map((s) => s.id)); break;
+    case "ai-check-stop": if (R.chk.ctl) R.chk.ctl.abort(); break;
+    case "ai-apply": {
+      const sub = R.subs.find((x) => x.id === v);
+      if (sub && sub.ai && sub.ai.baho) {
+        if (!S.grade[v]) S.grade[v] = { baho: 0, izoh: "" };
+        S.grade[v].baho = sub.ai.baho;
+        if (!S.grade[v].izoh && sub.ai.oquvchiga) S.grade[v].izoh = sub.ai.oquvchiga;
+        render();
+        toast("AI taklifi qo'llandi. Tekshirib, \"Bahoni saqlash\" tugmasini bosing.");
+      }
+      break;
+    }
     case "seed-demo": seedDemo(); break;
     case "clear-ask": S.confirm = { kind: "clear" }; render(); break;
     case "clear-yes": clearAllLocal(); break;

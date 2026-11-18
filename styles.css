@@ -426,6 +426,15 @@ td.num, th.num { text-align: center; font-variant-numeric: tabular-nums; }
 .sec-h .row .field { min-width: 160px; }
 @media (max-width: 860px) { .filters4 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
 .nowrap { white-space: nowrap; }
+.ai-card { border: 1.5px solid color-mix(in srgb, var(--siyoh) 30%, var(--line)); background: color-mix(in srgb, var(--lilac) 45%, var(--sheet)); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.ai-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ai-head svg, .ai-bar svg { width: 20px; height: 20px; color: var(--siyoh); flex: none; }
+.ai-baho { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.ai-errs { margin: 0; padding-left: 20px; font-size: 14px; display: flex; flex-direction: column; gap: 4px; }
+.ai-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; border-radius: 14px; background: color-mix(in srgb, var(--lilac) 45%, var(--sheet)); border: 1px solid color-mix(in srgb, var(--siyoh) 25%, var(--line)); font-size: 14px; }
+.ai-bar span { flex: 1 1 200px; }
+.pill.ai { background: var(--lilac); color: var(--siyoh); }
+.tiny { font-size: 12px; }
 button.pdf-link { width: 100%; background: none; border: none; text-align: left; cursor: pointer; color: inherit; font: inherit; }
 .demo-box { border: 1.5px dashed var(--sun); border-radius: 14px; padding: 14px; background: color-mix(in srgb, var(--marker) 35%, var(--sheet)); display: flex; flex-direction: column; gap: 8px; }
 .demo-box table { font-size: 14px; }

@@ -13,6 +13,7 @@ O'qituvchi uyga vazifani rasm, PDF yoki test qilib yuboradi. O'quvchi telefonida
 - **Sinflar va o'quvchilar:** o'quvchilar bittalab yoki butun ro'yxat bilan qo'shiladi. Login va parol avtomatik yaratiladi, ularni CSV qilib yuklab olsa bo'ladi.
 - **Uyga vazifa:** sinf va fan tanlanadi, vazifa rasm yoki PDF qilib yuboriladi yoki test tuziladi. Vazifa sinfdagi barcha o'quvchilarga boradi.
 - **Kelgan javoblar:** javoblar o'quvchining ism-familiyasi bilan keladi. Baho (2–5) va izoh qo'yiladi.
+- **AI tekshiruvi:** AI o'quvchining javobini (rasm yoki PDF) vazifa bilan solishtiradi, xatolarni topadi va baho taklif qiladi. Bitta tugma bilan hamma javobni tekshirtirsa bo'ladi. Yakuniy bahoni o'qituvchi qo'yadi. Bu imkoniyat hozircha claude.ai versiyasida ishlaydi.
 - **Hisobotlar:** sinf va fan bo'yicha natijalar jadvali. Excel'da ochiladigan CSV fayl qilib yuklab olinadi.
 
 **O'quvchi profili**
@@ -53,7 +54,7 @@ Bu versiyada (GitHub Pages yoki kompyuterdagi fayl) ma'lumotlar **faqat shu brau
 - Butun platforma bitta `index.html` faylida ishlaydi: HTML, CSS va JavaScript, hech qanday kutubxonasiz.
 - Manba fayllar `src/` papkasida: `styles.css` (dizayn), `ill.js` (chizilgan rasmlar), `app.js` (mantiq). O'zgartirgandan keyin `python3 build.py` buyrug'i ularni `index.html` ga yig'adi.
 - Ma'lumotlar saqlanadigan joy ikkita:
-  - **claude.ai versiyasi:** ma'lumotlar artefakt bazasida saqlanadi, fayllar alohida yuklanadi, AI yordamchi ishlaydi.
+  - **claude.ai versiyasi:** ma'lumotlar artefakt bazasida saqlanadi, fayllar alohida yuklanadi, AI yordamchi va AI tekshiruvi ishlaydi.
   - **Mustaqil versiya (GitHub Pages):** ma'lumotlar brauzerning IndexedDB xotirasida, demo rejimida saqlanadi.
 - Parollar SHA-256 bilan, tasodifiy "tuz" (salt) qo'shib saqlanadi. Bu prototip uchun yetarli, lekin haqiqiy xavfsizlik emas.
 
@@ -61,7 +62,7 @@ Bu versiyada (GitHub Pages yoki kompyuterdagi fayl) ma'lumotlar **faqat shu brau
 
 - **Ko'p qurilmada ishlash.** Haqiqiy maktabda ishlatish uchun umumiy server kerak: o'qituvchi bir qurilmadan, o'quvchilar o'z telefonlaridan kirishi uchun. Buning uchun Supabase yoki Firebase kabi tayyor xizmatlarning bepul rejasi yetarli.
 - **Xavfsiz kirish.** Login va parol server tomonda tekshirilishi kerak.
-- **AI yordamchi.** U AI xizmati kaliti saqlanadigan kichik server funksiyasi orqali ulanadi.
+- **AI (yordamchi va tekshiruv) GitHub versiyasida.** U AI xizmati kaliti saqlanadigan kichik server funksiyasi orqali ulanadi.
 - **Qo'shimcha imkoniyatlar:** ota-onalar uchun hisobot, eslatmalar, rus va qoraqalpoq tillari.
 
 ## Jamoa
